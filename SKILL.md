@@ -1,3 +1,8 @@
+---
+name: syntx
+description: Use this skill when generating images with Syntx.ai, authenticating Syntx through Telegram, managing Syntx image chats, retrieving generated image URLs, or troubleshooting the local syntx MCP server.
+---
+
 # Syntx MCP Skill
 
 Use this skill when a user wants to generate images with Syntx.ai through the local `syntx` MCP server, manage Syntx image chats, retrieve generated image URLs, or troubleshoot Syntx MCP authentication.

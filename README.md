@@ -50,6 +50,11 @@ python mcp_server.py --http --host 127.0.0.1 --port 8000
 
 ## MCP Client Configuration
 
+This repository can be used in two complementary ways:
+
+- As an MCP server: clients call the real Syntx tools from `mcp_server.py`.
+- As a Claude skill: agents read `.claude/skills/syntx/SKILL.md` to learn when and how to use the Syntx MCP tools.
+
 ### VS Code
 
 This repository already includes `.vscode/mcp.json`:
@@ -84,6 +89,22 @@ Add this server to your Claude Desktop MCP configuration. Replace `/absolute/pat
 ```
 
 Restart Claude Desktop after saving the configuration.
+
+### Claude Project Skill
+
+This repository includes a project skill at:
+
+```text
+.claude/skills/syntx/SKILL.md
+```
+
+That skill does not replace the MCP server. It teaches Claude how to use the Syntx MCP tools correctly: authenticate through Telegram, generate images, poll for results, inspect old chats, and handle common errors.
+
+Use both together for the best experience:
+
+1. Configure the `syntx` MCP server.
+2. Keep `.claude/skills/syntx/SKILL.md` in the project.
+3. Ask Claude for Syntx image generation or Syntx chat/image retrieval.
 
 ### Claude Code
 
