@@ -85,17 +85,58 @@ def syntx_create_chat(title: str = "New chat") -> str:
 
 
 @mcp.tool()
+def syntx_upload_image(file_paths: list[str]) -> str:
+    """Upload local image files to Syntx CDN. Returns CDN URLs for use in syntx_generate_image.
+
+    file_paths: list of absolute or relative paths to image files.
+    """
+    files = [("files", (Path(p).name, open(p, "rb"), "image/png")) for p in file_paths]
+    try:
+        resp = requests.post(
+            f"{BASE_URL}/chats/upload-files",
+            headers=_auth_headers(),
+            files=files,
+            data={"check_duplicates": "true"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        raw = (
+            [item["url"] for item in data]
+            if isinstance(data, list)
+            else data.get("urls", data.get("files", []))
+        )
+        urls = [
+            (
+                item
+                if isinstance(item, str)
+                else item.get("url", item.get("file_url", json.dumps(item)))
+            )
+            for item in raw
+        ]
+        if not urls:
+            return f"Upload response: {json.dumps(data)}"
+        return "Uploaded:\n" + "\n".join(urls)
+    finally:
+        for _, (_, fobj, _) in files:
+            fobj.close()
+
+
+@mcp.tool()
 def syntx_generate_image(
     prompt: str,
     chat_uuid: str = "",
     aspect_ratio: str = "16:9",
     n: int = 1,
     model_type: str = "banana",
+    image_urls: list[str] | None = None,
 ) -> str:
-    """Generate an image. Creates chat automatically if chat_uuid not provided.
+    """Generate or edit an image. Creates chat automatically if chat_uuid not provided.
     Returns message_id — use syntx_get_image to poll for result.
 
+    model_type options: banana, midjourney, seedream, sora-images, flux,
+                        runway-frames, imagen4, higgsfield-soul, ideogram, wan_image, grok_image
     aspect_ratio options: 21:9, 16:9, 9:16, 5:4, 4:5, 4:3, 3:4, 3:2, 2:3, 1:1
+    image_urls: CDN URLs of reference/source images (from syntx_upload_image) for editing.
     """
     if not chat_uuid:
         resp = requests.post(
@@ -111,7 +152,7 @@ def syntx_generate_image(
         "prompt": prompt,
         "settings": {
             "n": n,
-            "image_url": [],
+            "image_url": image_urls or [],
             "model_type": model_type,
             "aspect_ratio": aspect_ratio,
             "image_size": None,
@@ -168,18 +209,114 @@ def syntx_get_image(chat_uuid: str) -> str:
 
 
 @mcp.tool()
+def syntx_generate_video(
+    prompt: str,
+    image_urls: list[str],
+    chat_uuid: str = "",
+    aspect_ratio: str = "16:9",
+    video_duration: int = 8,
+    model_type: str = "veo3fast_r",
+) -> str:
+    """Generate a video from images. Requires CDN URLs from syntx_upload_image.
+    Creates video chat automatically if chat_uuid not provided.
+    Returns chat_uuid — use syntx_get_video to poll for result.
+
+    model_type options: veo3fast_r, veo3
+    aspect_ratio options: 16:9, 9:16
+    video_duration: seconds (default 8).
+    image_urls: source image CDN URLs (from syntx_upload_image).
+    """
+    if not chat_uuid:
+        resp = requests.post(
+            f"{BASE_URL}/chats",
+            headers={**_auth_headers(), "Content-Type": "application/json"},
+            json={"title": prompt[:50], "scope": "video"},
+        )
+        resp.raise_for_status()
+        chat_uuid = resp.json()["uuid"]
+
+    payload = {
+        "chat_id": chat_uuid,
+        "prompt": prompt,
+        "settings": {
+            "model_type": model_type,
+            "aspect_ratio": aspect_ratio,
+            "type": "image",
+            "video_duration": video_duration,
+            "upscale": 0,
+            "image_urls": image_urls,
+        },
+    }
+    resp = requests.post(
+        f"{BASE_URL}/video/generate?ai_name={model_type}",
+        headers={**_auth_headers(), "Content-Type": "application/json"},
+        json=payload,
+    )
+    if not resp.ok:
+        return f"Error {resp.status_code}: {resp.text}"
+    resp.raise_for_status()
+    return f"Video generation started. Call syntx_get_video(chat_uuid='{chat_uuid}') to poll for result."
+
+
+@mcp.tool()
+def syntx_get_video(chat_uuid: str) -> str:
+    """Check if video is ready and return its URL. Call repeatedly until ready."""
+    inprogress_resp = requests.get(
+        f"{BASE_URL}/chats/{chat_uuid}/inprogress",
+        headers=_auth_headers(),
+    )
+    inprogress_resp.raise_for_status()
+    items = inprogress_resp.json()
+
+    if items:
+        state = STATE_FILE.read_text() if STATE_FILE.exists() else "{}"
+        state_data = json.loads(state)
+        state_data[chat_uuid] = items[0]["message_id"]
+        STATE_FILE.write_text(json.dumps(state_data))
+        return "Video not ready yet. Try again in a few seconds."
+
+    state_data = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+    message_id = state_data.get(chat_uuid)
+    if not message_id:
+        return "No pending video found for this chat_uuid."
+
+    resp = requests.get(
+        f"{BASE_URL}/chats/{chat_uuid}/{message_id}",
+        headers=_auth_headers(),
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    for obj in data.get("message_object", []):
+        if obj.get("object_type") == "video" and obj.get("object_url"):
+            url = obj["object_url"]
+            preview_url = obj.get("metadata", {}).get("preview_url", "")
+            result = f"Video ready!\nURL: {url}"
+            if preview_url:
+                result += f"\nThumbnail: {preview_url}"
+            return result
+    return "Video not ready yet. Try again in a few seconds."
+
+
+@mcp.tool()
 def syntx_list_chats(page_size: int = 50, search: str = "") -> str:
     """List image chats. Returns chat UUIDs and titles."""
     resp = requests.get(
         f"{BASE_URL}/chats",
         headers=_auth_headers(),
-        params={"scope": "image", "search": search, "direction": "older", "page_size": page_size},
+        params={
+            "scope": "image",
+            "search": search,
+            "direction": "older",
+            "page_size": page_size,
+        },
     )
     resp.raise_for_status()
     chats = resp.json().get("chats", [])
     if not chats:
         return "No chats found."
-    lines = [f"{c['uuid']} — {c['title']} ({c['message_count']} messages)" for c in chats]
+    lines = [
+        f"{c['uuid']} — {c['title']} ({c['message_count']} messages)" for c in chats
+    ]
     return "\n".join(lines)
 
 

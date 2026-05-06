@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-This file gives Claude Code repository-specific context. User-facing setup and usage documentation lives in `README.md`; reusable agent instructions live in `SKILL.md`.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+User-facing setup and usage documentation lives in `README.md`; reusable agent instructions live in `SKILL.md`.
 
 ## Setup
 
@@ -22,47 +24,76 @@ Run over Streamable HTTP:
 python mcp_server.py --http --host 127.0.0.1 --port 8000
 ```
 
+Import/syntax check (no test suite):
+
+```bash
+python -m py_compile mcp_server.py
+```
+
 ## Architecture
 
-This is a single-file FastMCP server in `mcp_server.py`.
+Single-file FastMCP server in `mcp_server.py`. MCP server name is `syntx`. Wraps the Syntx.ai API.
 
-The MCP server name is `syntx`. It wraps the Syntx.ai API and exposes tools for Telegram auth, image chat management, image generation, polling, chat history lookup, and logout.
+`transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)` is intentional — this server is designed for controlled local client environments.
+
+Two local state files:
+
+- `~/.syntx_token.json` — Syntx bearer token after login
+- `~/.syntx_state.json` — in-progress image `message_id` keyed by `chat_uuid`
 
 ## Auth Flow
 
-1. `syntx_login_telegram` calls `POST /api/v1/auth/startauth`.
-2. The response UUID is used to build a Telegram bot login link.
-3. The user approves login in Telegram.
-4. `syntx_check_auth` calls `GET /api/v1/auth/token/{uuid}` until `complete` is true.
-5. The returned bearer token is saved to `~/.syntx_token.json`.
+1. `syntx_login_telegram` → `POST /api/v1/auth/startauth` → returns UUID + Telegram bot link.
+2. User approves in Telegram.
+3. `syntx_check_auth(uuid)` → `GET /api/v1/auth/token/{uuid}` → polls until `complete` is true → saves token to `~/.syntx_token.json`.
 
-Bearer tokens are sent in the `Authorization` header for authenticated endpoints.
+Bearer token sent in `Authorization: Bearer {token}` header on all authenticated calls.
 
 ## Image Generation Flow
 
-1. `syntx_generate_image` creates an image chat if no `chat_uuid` is provided.
-2. It calls `POST /api/v1/design/generate?ai_name={model_type}`.
-3. `syntx_get_image` first checks `GET /api/v1/chats/{chat_uuid}/inprogress`.
-4. While an item is in progress, the tool saves its `message_id` in `~/.syntx_state.json`.
-5. Once in-progress items disappear, `syntx_get_image` fetches `GET /api/v1/chats/{chat_uuid}/{message_id}` and returns `message_object[].object_url`.
+1. `syntx_generate_image` auto-creates a chat if `chat_uuid` is empty, then calls `POST /api/v1/design/generate?ai_name={model_type}`.
+2. `syntx_get_image` calls `GET /api/v1/chats/{chat_uuid}/inprogress`.
+   - While items exist, saves `message_id` from the first item to `~/.syntx_state.json` and returns "not ready".
+   - Once inprogress is empty, reads `message_id` from state file and fetches `GET /api/v1/chats/{chat_uuid}/{message_id}`.
+   - Returns `object_url` from the first `message_object` entry with `object_type == "image"`.
+   - **Edge case**: if state file has no entry for `chat_uuid` when inprogress empties (e.g. server restarted mid-generation), returns "No pending image found". Use `syntx_get_chat_messages` to recover.
+
+## Image Edit Flow
+
+1. `syntx_upload_image(file_paths)` → `POST /api/v1/chats/upload-files` → returns CDN URLs.
+2. Pass those URLs as `image_urls` to `syntx_generate_image`.
+3. Poll with `syntx_get_image` as usual.
+
+## Image Settings
+
+- `model_type`: `banana` (default), `midjourney`, `seedream`, `sora-images`, `flux`, `runway-frames`, `imagen4`, `higgsfield-soul`, `ideogram`, `wan_image`, `grok_image`
+- `aspect_ratio`: `21:9`, `16:9`, `9:16`, `5:4`, `4:5`, `4:3`, `3:4`, `3:2`, `2:3`, `1:1`
+- `n`: number of images
+
+## Video Generation Flow
+
+1. `syntx_upload_image(file_paths)` → CDN URLs.
+2. `syntx_generate_video(prompt, image_urls, ...)` creates a chat with `scope: "video"`, calls `POST /api/v1/video/generate?ai_name={model_type}`.
+   - Payload uses `chat_id` (not `chat_uuid`) — this is the only endpoint with that field name.
+   - Settings include `type: "image"` (image-to-video), `video_duration`, `upscale: 0`.
+3. `syntx_get_video` polls `GET /api/v1/chats/{chat_uuid}/inprogress` — same state file logic as images.
+   - Done response has `object_type: "video"`, `object_url` is `.mp4`, thumbnail in `metadata.preview_url` (not `metadata.preview`).
+
+Video model options: `veo3fast_r`, `veo3`. Aspect ratio: `16:9`, `9:16`.
 
 ## Tools
 
 - `syntx_login_telegram`
 - `syntx_check_auth`
 - `syntx_create_chat`
-- `syntx_generate_image`
+- `syntx_upload_image` — upload local files to CDN, returns URLs
+- `syntx_generate_image` — accepts optional `image_urls` for editing; response message contains the `chat_uuid` as plain text
 - `syntx_get_image`
+- `syntx_generate_video` — image-to-video; requires `image_urls` from CDN
+- `syntx_get_video`
 - `syntx_list_chats`
 - `syntx_get_chat_messages`
 - `syntx_logout`
-
-## Image Settings
-
-- `model_type`: `banana` by default
-- `aspect_ratio`: `21:9`, `16:9`, `9:16`, `5:4`, `4:5`, `4:3`, `3:4`, `3:2`, `2:3`, `1:1`
-- `n`: number of images
-- `image_url`: reference images list, currently sent as an empty list by this server
 
 ## API Base
 
@@ -70,4 +101,4 @@ Bearer tokens are sent in the `Authorization` header for authenticated endpoints
 https://api.syntx.ai/api/v1
 ```
 
-Browser-like headers are included in `HEADERS`; Syntx currently expects them for these API calls.
+Browser-like headers in `HEADERS` constant — Syntx requires them for these endpoints.
